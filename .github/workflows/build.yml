@@ -41,6 +41,9 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw "Build failed" }
         nmake install
         cd ../..
+        
+        Write-Host "Zlib installed at: $installPath"
+        Get-ChildItem "$installPath" -Recurse | Select-Object -First 20
     
     - name: Build Ptex
       shell: powershell
@@ -69,6 +72,10 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw "Build failed" }
         nmake install
         cd ../..
+        
+        Write-Host "Ptex installed at: $installPath"
+        Write-Host "Checking for cmake config files:"
+        Get-ChildItem "$installPath" -Recurse -Filter "*.cmake" -ErrorAction SilentlyContinue
     
     - name: Build Ptxutils
       shell: powershell
@@ -76,7 +83,7 @@ jobs:
         git clone --depth 1 https://github.com/wdas/ptexutils.git
         cd ptexutils
         
-        # 修改 CMakeLists.txt 强制静态运行时
+        # 强制静态运行时
         $content = Get-Content CMakeLists.txt -Raw
         $content = $content -replace 'if\(PTEX_FOUND\)', "set(CMAKE_MSVC_RUNTIME_LIBRARY `"MultiThreaded`")`nif(PTEX_FOUND)"
         $content | Set-Content CMakeLists.txt -NoNewline
@@ -85,19 +92,35 @@ jobs:
         $ptexPath = "$rootPath/ptex-install"
         $zlibPath = "$rootPath/zlib-install"
         
-        if (!(Test-Path $ptexPath)) { throw "Ptex not found" }
+        if (!(Test-Path $ptexPath)) { throw "Ptex not found at $ptexPath" }
         
-        # 关键：设置 CMAKE_PREFIX_PATH 让 CMake 找到 PtexConfig.cmake
-        $env:CMAKE_PREFIX_PATH = "$ptexPath/lib/cmake"
+        # 查找 PtexConfig.cmake 的实际位置
+        $cmakeConfig = Get-ChildItem -Path "$ptexPath" -Name "PtexConfig.cmake" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cmakeConfig) {
+          Write-Host "Found PtexConfig.cmake at: $cmakeConfig"
+          $ptexCmakeDir = Split-Path (Join-Path "$ptexPath" $cmakeConfig) -Parent
+          $env:Ptex_DIR = $ptexCmakeDir
+        } else {
+          Write-Host "WARNING: PtexConfig.cmake not found, trying default paths"
+          # 尝试常见路径
+          if (Test-Path "$ptexPath/lib/cmake/Ptex") {
+            $env:Ptex_DIR = "$ptexPath/lib/cmake/Ptex"
+          } elseif (Test-Path "$ptexPath/cmake") {
+            $env:Ptex_DIR = "$ptexPath/cmake"
+          }
+        }
+        
+        Write-Host "Using Ptex_DIR: $env:Ptex_DIR"
         
         New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
+        
         cmake .. -G "NMake Makefiles" `
           -DCMAKE_BUILD_TYPE=Release `
           -DBUILD_SHARED_LIBS=OFF `
-          -DCMAKE_PREFIX_PATH="$ptexPath/lib/cmake" `
           -DZLIB_ROOT="$zlibPath" `
           -DZLIB_LIBRARY="$zlibPath/lib/zlibstatic.lib"
+          
         if ($LASTEXITCODE -ne 0) { throw "CMake failed" }
         nmake
         if ($LASTEXITCODE -ne 0) { throw "Build failed" }
@@ -107,10 +130,15 @@ jobs:
       shell: powershell
       run: |
         $exe = Get-ChildItem -Path "ptexutils" -Name "ptxtransfer.exe" -Recurse | Select-Object -First 1
+        if (!$exe) { 
+          Write-Host "Searching all directories for ptxtransfer.exe..."
+          $exe = Get-ChildItem -Path "." -Name "ptxtransfer.exe" -Recurse | Select-Object -First 1
+        }
         if (!$exe) { throw "Executable not found" }
-        $fullPath = Join-Path "ptexutils" $exe
+        $fullPath = Join-Path "." $exe
         Copy-Item $fullPath "ptxtransfer.exe"
-        Write-Host "Found and copied: $exe"
+        Write-Host "Copied from: $fullPath"
+        Get-Item "ptxtransfer.exe"
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
