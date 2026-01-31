@@ -1,30 +1,17 @@
-name: Build Static Ptxtransfer
-
-on:
-  push:
-    branches: [ main ]
-    tags: [ 'v*' ]
-  workflow_dispatch:
-
-jobs:
-  build-windows:
-    runs-on: windows-2019
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Setup MSVC
-      uses: ilammy/msvc-dev-cmd@v1
-      with:
-        arch: x64
-    
     # 1. 编译 Zlib (静态)
     - name: Build Zlib
       shell: powershell
       run: |
         git clone --depth 1 --branch v1.3 https://github.com/madler/zlib.git
         cd zlib
-        $installPath = (Resolve-Path "../zlib-install").Path -replace "\\", "/"
+        
+        # 创建安装目录（先创建，再 Resolve）
+        $installDir = Join-Path (Get-Location).Parent "zlib-install"
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+        
+        # 现在可以安全地 Resolve 了
+        $installPath = (Resolve-Path $installDir).Path -replace "\\", "/"
+        
         New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
         cmake .. -G "NMake Makefiles" `
@@ -43,8 +30,17 @@ jobs:
       run: |
         git clone --depth 1 --branch v2.4.2 https://github.com/wdas/ptex.git
         cd ptex
-        $zlibRoot = (Resolve-Path "../zlib-install").Path -replace "\\", "/"
-        $installPath = (Resolve-Path "../ptex-install").Path -replace "\\", "/"
+        
+        # 确保依赖目录存在
+        $zlibDir = Join-Path (Get-Location).Parent "zlib-install"
+        $installDir = Join-Path (Get-Location).Parent "ptex-install"
+        
+        if (-not (Test-Path $zlibDir)) { throw "Zlib install directory not found!" }
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+        
+        $zlibRoot = (Resolve-Path $zlibDir).Path -replace "\\", "/"
+        $installPath = (Resolve-Path $installDir).Path -replace "\\", "/"
+        
         New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
         cmake .. -G "NMake Makefiles" `
@@ -60,22 +56,27 @@ jobs:
         nmake install
         cd ../..
     
-    # 3. 编译 ptxutils (完全静态)
+    # 3. 编译 ptxutils
     - name: Build Ptxutils
       shell: powershell
       run: |
         git clone --depth 1 https://github.com/wdas/ptexutils.git
         cd ptexutils
         
-        # 强制静态运行时 - 使用单引号避免引号冲突
+        # 修改 CMakeLists.txt
         $content = Get-Content CMakeLists.txt -Raw
-        $oldText = 'if(PTEX_FOUND)'
-        $newText = "set(CMAKE_MSVC_RUNTIME_LIBRARY `"MultiThreaded`")`nif(PTEX_FOUND)"
-        $content = $content -replace [regex]::Escape($oldText), $newText
+        $content = $content -replace 'if\(PTEX_FOUND\)', "set(CMAKE_MSVC_RUNTIME_LIBRARY `"MultiThreaded`")`nif(PTEX_FOUND)"
         $content | Set-Content CMakeLists.txt -NoNewline
         
-        $ptexLoc = (Resolve-Path "../ptex-install").Path -replace "\\", "/"
-        $zlibRoot = (Resolve-Path "../zlib-install").Path -replace "\\", "/"
+        # 确保依赖存在
+        $ptexDir = Join-Path (Get-Location).Parent "ptex-install"
+        $zlibDir = Join-Path (Get-Location).Parent "zlib-install"
+        
+        if (-not (Test-Path $ptexDir)) { throw "Ptex install directory not found!" }
+        if (-not (Test-Path $zlibDir)) { throw "Zlib install directory not found!" }
+        
+        $ptexLoc = (Resolve-Path $ptexDir).Path -replace "\\", "/"
+        $zlibRoot = (Resolve-Path $zlibDir).Path -replace "\\", "/"
         
         New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
@@ -89,62 +90,3 @@ jobs:
         nmake
         if ($LASTEXITCODE -ne 0) { throw "Ptxutils build failed" }
         cd ../..
-    
-    # 4. 验证并打包
-    - name: Verify & Package
-      shell: powershell
-      run: |
-        $exePaths = @(
-          "ptexutils/build/src/ptxtransfer.exe",
-          "ptexutils/build/src/Release/ptxtransfer.exe",
-          "ptexutils/build/Release/ptxtransfer.exe"
-        )
-        
-        $found = $null
-        foreach ($path in $exePaths) {
-          if (Test-Path $path) {
-            $found = $path
-            Write-Host "Found ptxtransfer.exe at: $path"
-            break
-          }
-        }
-        
-        if (-not $found) {
-          Write-Host "Searching recursively..."
-          $found = Get-ChildItem -Path "." -Name "ptxtransfer.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($found) { $found = Resolve-Path $found }
-        }
-        
-        if (-not $found) {
-          throw "ptxtransfer.exe not found in any expected location!"
-        }
-        
-        Copy-Item $found "ptxtransfer.exe"
-        Write-Host "Copied to root as ptxtransfer.exe"
-        
-        # 验证依赖
-        Write-Host "`nChecking dependencies..."
-        dumpbin /dependents "ptxtransfer.exe"
-    
-    # 5. 上传
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ptxtransfer-windows-x64
-        path: ptxtransfer.exe
-        if-no-files-found: error
-    
-    # 6. Release
-    - name: Release
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: ptxtransfer.exe
-        name: "Ptxtransfer ${{ github.ref_name }}"
-        body: |
-          ## 静态编译版 Ptxtransfer for Windows
-          - 完全静态链接（无 DLL 依赖）
-          - Visual Studio 2019 编译（兼容 Maya 2022）
-          - x64 架构
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
