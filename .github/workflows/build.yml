@@ -26,17 +26,24 @@ jobs:
         git clone --depth 1 --branch v1.3 https://github.com/madler/zlib.git
         cd zlib
         
-        $installPath = "$(Resolve-Path ..)/zlib-install" -replace '\\', '/'
         New-Item -ItemType Directory -Force -Path "../zlib-install" | Out-Null
-        New-Item -ItemType Directory -Force -Path build | Out-Null
+        $installPath = "$(Resolve-Path ../zlib-install)" -replace '\\', '/'
         
+        New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
-        cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$installPath" -DBUILD_SHARED_LIBS=OFF
+        
+        cmake .. -G "NMake Makefiles" `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DCMAKE_INSTALL_PREFIX="$installPath" `
+          -DBUILD_SHARED_LIBS=OFF
+          
+        if ($LASTEXITCODE -ne 0) { throw "Zlib CMake failed" }
         nmake
+        if ($LASTEXITCODE -ne 0) { throw "Zlib build failed" }
         nmake install
         cd ../..
     
-    - name: Clean and Build Ptex (No GLUT)
+    - name: Clean and Build Ptex
       shell: powershell
       run: |
         if (Test-Path "ptex") { Remove-Item -Recurse -Force "ptex" }
@@ -44,9 +51,10 @@ jobs:
         cd ptex
         
         $zlibPath = "$(Resolve-Path ../zlib-install)" -replace '\\', '/'
-        New-Item -ItemType Directory -Force -Path build | Out-Null
         
+        New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
+        
         cmake .. -G "NMake Makefiles" `
           -DCMAKE_BUILD_TYPE=Release `
           -DBUILD_SHARED_LIBS=OFF `
@@ -56,63 +64,85 @@ jobs:
           -DPTEX_BUILD_DOCS=OFF `
           -DZLIB_ROOT="$zlibPath" `
           -DZLIB_LIBRARY="$zlibPath/lib/zlibstatic.lib"
+          
+        if ($LASTEXITCODE -ne 0) { throw "Ptex CMake failed" }
         nmake
+        if ($LASTEXITCODE -ne 0) { throw "Ptex build failed" }
         cd ../..
     
-    - name: Prepare Ptxutils Build Files
+    - name: Prepare Ptxutils
       shell: powershell
       run: |
         if (Test-Path "ptexutils") { Remove-Item -Recurse -Force "ptexutils" }
         git clone --depth 1 https://github.com/wdas/ptexutils.git
-        cd ptexutils  # <-- 修正：原来是 ptxutils，改为 ptexutils
+        cd ptexutils
         
-        # 创建自定义 CMake 配置，避免修改原文件
-        $ptexRoot = "$(Resolve-Path ../ptex)" -replace '\\', '/'
-        $zlibRoot = "$(Resolve-Path ../zlib-install)" -replace '\\', '/'
+        # 动态查找 Ptex 库文件（避免硬编码 Release 路径）
+        $ptexLib = Get-ChildItem -Path "../ptex" -Name "Ptex.lib" -Recurse | Select-Object -First 1
+        if (-not $ptexLib) { throw "Ptex.lib not found" }
+        $ptexLibPath = "$(Resolve-Path "../ptex/$ptexLib")" -replace '\\', '/'
+        $ptexInclude = "$(Resolve-Path "../ptex/build/src")" -replace '\\', '/'
         
-        # 写入配置到文件，避免 YAML 转义问题
-        $configContent = @"
-        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
-        set(PTEX_INCLUDE_DIR "$ptexRoot/build/src")
-        set(PTEX_LIBRARY "$ptexRoot/build/src/Release/Ptex.lib")
-        set(ZLIB_ROOT "$zlibRoot")
-        set(ZLIB_LIBRARY "$zlibRoot/lib/zlibstatic.lib")
-        include_directories(${PTEX_INCLUDE_DIR})
-        link_directories($ptexRoot/build/src/Release $zlibRoot/lib)
-        "@
+        $zlibLib = Get-ChildItem -Path "../zlib-install" -Name "zlibstatic.lib" -Recurse | Select-Object -First 1
+        if (-not $zlibLib) { throw "zlibstatic.lib not found" }
+        $zlibLibPath = "$(Resolve-Path "../zlib-install/$zlibLib")" -replace '\\', '/'
+        $zlibInclude = "$(Resolve-Path "../zlib-install/include")" -replace '\\', '/'
         
-        # 保存到文件
-        $configContent | Out-File -FilePath "cmake/CustomPaths.cmake" -Encoding utf8
+        # 创建 cmake 配置目录
+        New-Item -ItemType Directory -Force -Path "cmake" | Out-Null
         
-        # 修改 CMakeLists.txt 加载自定义配置
-        $cmakelists = Get-Content CMakeLists.txt
-        $cmakelists[0] = $cmakelists[0] + "`ninclude(cmake/CustomPaths.cmake)`n"
+        # 创建自定义 cmake 文件
+        @"
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+set(PTEX_INCLUDE_DIR "$ptexInclude")
+set(PTEX_LIBRARY "$ptexLibPath")
+set(ZLIB_INCLUDE_DIR "$zlibInclude")
+set(ZLIB_LIBRARY "$zlibLibPath")
+include_directories(`${PTEX_INCLUDE_DIR} `${ZLIB_INCLUDE_DIR})
+link_directories("$((Split-Path $ptexLibPath -Parent))" "$((Split-Path $zlibLibPath -Parent))")
+"@ | Out-File -FilePath "cmake/CustomPaths.cmake" -Encoding utf8
         
-        # 替换 find_package 和 target_link_libraries
-        $cmakelists = $cmakelists -replace 'find_package\s*\(\s*Ptex\s+REQUIRED\s*\)', ''
-        $cmakelists = $cmakelists -replace 'Ptex::Ptex', '${PTEX_LIBRARY}'
+        # 修改 CMakeLists.txt：注入自定义配置并替换 Ptex::Ptex
+        (Get-Content CMakeLists.txt -Raw) `
+          -replace 'project\(.*?\)', "`$&`n`ninclude(cmake/CustomPaths.cmake)`n" `
+          -replace 'find_package\s*\(\s*Ptex[^)]*\)', '' `
+          -replace 'target_link_libraries\s*\(([^)]*)\)\s*', "target_link_libraries(`$1 ${ptexLibPath} ${zlibLibPath})" `
+          -replace 'Ptex::Ptex', '' `
+          | Set-Content CMakeLists.txt -NoNewline
         
-        $cmakelists | Set-Content CMakeLists.txt
         cd ..
     
     - name: Build Ptxutils
       shell: powershell
       run: |
-        cd ptxutils
+        cd ptexutils
         New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
         
-        cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+        cmake .. -G "NMake Makefiles" `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DBUILD_SHARED_LIBS=OFF
+          
+        if ($LASTEXITCODE -ne 0) { throw "Ptxutils CMake failed" }
         nmake
+        if ($LASTEXITCODE -ne 0) { throw "Ptxutils build failed" }
         cd ../..
     
     - name: Copy Executable
       shell: powershell
       run: |
         $exe = Get-ChildItem -Path "ptexutils" -Name "ptxtransfer.exe" -Recurse | Select-Object -First 1
-        if (-not $exe) { throw "ptxtransfer.exe not found" }
-        Copy-Item "ptexutils/$exe" "ptxtransfer.exe"
-        Write-Host "Built successfully: $((Get-Item ptxtransfer.exe).FullName)"
+        if (-not $exe) { throw "ptxtransfer.exe not found in ptexutils directory" }
+        
+        $sourcePath = Join-Path "ptexutils" $exe
+        Copy-Item $sourcePath "ptxtransfer.exe"
+        
+        Write-Host "Successfully built: $((Resolve-Path ptxtransfer.exe).Path)"
+        
+        # 验证是否为静态链接（不应依赖 Ptex.dll 或 zlib.dll）
+        $deps = dumpbin /dependents ptxtransfer.exe | Select-String "\.dll"
+        Write-Host "`nDependencies:"
+        $deps | ForEach-Object { Write-Host $_.Line }
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
