@@ -11,9 +11,8 @@ jobs:
     runs-on: windows-2019
     
     steps:
-    - uses: actions/checkout@v4  # 也建议升级到 v4
+    - uses: actions/checkout@v4
     
-    # 设置 VS 2019 环境
     - name: Setup MSVC
       uses: ilammy/msvc-dev-cmd@v1
       with:
@@ -21,94 +20,121 @@ jobs:
     
     # 1. 编译 Zlib (静态)
     - name: Build Zlib
-      shell: cmd
+      shell: powershell
       run: |
         git clone --depth 1 --branch v1.3 https://github.com/madler/zlib.git
         cd zlib
-        mkdir build && cd build
-        cmake .. -G "NMake Makefiles" ^
-          -DCMAKE_BUILD_TYPE=Release ^
-          -DCMAKE_INSTALL_PREFIX="%CD:\=/%/../install" ^
+        $installPath = (Resolve-Path "../zlib-install").Path -replace "\\", "/"
+        New-Item -ItemType Directory -Force -Path build | Out-Null
+        cd build
+        cmake .. -G "NMake Makefiles" `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DCMAKE_INSTALL_PREFIX="$installPath" `
           -DBUILD_SHARED_LIBS=OFF
+        if ($LASTEXITCODE -ne 0) { throw "Zlib CMake failed" }
         nmake
+        if ($LASTEXITCODE -ne 0) { throw "Zlib build failed" }
         nmake install
         cd ../..
     
     # 2. 编译 Ptex (静态)
     - name: Build Ptex
-      shell: cmd
+      shell: powershell
       run: |
         git clone --depth 1 --branch v2.4.2 https://github.com/wdas/ptex.git
         cd ptex
-        mkdir build && cd build
-        cmake .. -G "NMake Makefiles" ^
-          -DCMAKE_BUILD_TYPE=Release ^
-          -DBUILD_SHARED_LIBS=OFF ^
-          -DPTEX_BUILD_SHARED_LIBS=OFF ^
-          -DZLIB_ROOT="%CD:\=/%/../../zlib/install" ^
-          -DZLIB_LIBRARY="%CD:\=/%/../../zlib/install/lib/zlibstatic.lib" ^
-          -DCMAKE_INSTALL_PREFIX="%CD:\=/%/../install"
+        $zlibRoot = (Resolve-Path "../zlib-install").Path -replace "\\", "/"
+        $installPath = (Resolve-Path "../ptex-install").Path -replace "\\", "/"
+        New-Item -ItemType Directory -Force -Path build | Out-Null
+        cd build
+        cmake .. -G "NMake Makefiles" `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DBUILD_SHARED_LIBS=OFF `
+          -DPTEX_BUILD_SHARED_LIBS=OFF `
+          -DZLIB_ROOT="$zlibRoot" `
+          -DZLIB_LIBRARY="$zlibRoot/lib/zlibstatic.lib" `
+          -DCMAKE_INSTALL_PREFIX="$installPath"
+        if ($LASTEXITCODE -ne 0) { throw "Ptex CMake failed" }
         nmake
+        if ($LASTEXITCODE -ne 0) { throw "Ptex build failed" }
         nmake install
         cd ../..
     
     # 3. 编译 ptxutils (完全静态)
     - name: Build Ptxutils
-      shell: cmd
+      shell: powershell
       run: |
         git clone --depth 1 https://github.com/wdas/ptexutils.git
         cd ptexutils
         
-        :: 修改 CMakeLists.txt 强制静态运行时
-        powershell -Command "(Get-Content CMakeLists.txt) -replace 'if\(PTEX_FOUND\)', 'set(CMAKE_MSVC_RUNTIME_LIBRARY \"MultiThreaded\")`nif(PTEX_FOUND)' | Set-Content CMakeLists.txt"
+        # 强制静态运行时 - 使用单引号避免引号冲突
+        $content = Get-Content CMakeLists.txt -Raw
+        $oldText = 'if(PTEX_FOUND)'
+        $newText = "set(CMAKE_MSVC_RUNTIME_LIBRARY `"MultiThreaded`")`nif(PTEX_FOUND)"
+        $content = $content -replace [regex]::Escape($oldText), $newText
+        $content | Set-Content CMakeLists.txt -NoNewline
         
-        mkdir build && cd build
-        cmake .. -G "NMake Makefiles" ^
-          -DCMAKE_BUILD_TYPE=Release ^
-          -DBUILD_SHARED_LIBS=OFF ^
-          -DPTEX_LOCATION="%CD:\=/%/../../ptex/install" ^
-          -DZLIB_ROOT="%CD:\=/%/../../zlib/install" ^
-          -DZLIB_LIBRARY="%CD:\=/%/../../zlib/install/lib/zlibstatic.lib"
+        $ptexLoc = (Resolve-Path "../ptex-install").Path -replace "\\", "/"
+        $zlibRoot = (Resolve-Path "../zlib-install").Path -replace "\\", "/"
+        
+        New-Item -ItemType Directory -Force -Path build | Out-Null
+        cd build
+        cmake .. -G "NMake Makefiles" `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DBUILD_SHARED_LIBS=OFF `
+          -DPTEX_LOCATION="$ptexLoc" `
+          -DZLIB_ROOT="$zlibRoot" `
+          -DZLIB_LIBRARY="$zlibRoot/lib/zlibstatic.lib"
+        if ($LASTEXITCODE -ne 0) { throw "Ptxutils CMake failed" }
         nmake
-        
+        if ($LASTEXITCODE -ne 0) { throw "Ptxutils build failed" }
         cd ../..
     
     # 4. 验证并打包
     - name: Verify & Package
       shell: powershell
       run: |
-        $exe = "ptexutils/build/src/ptxtransfer.exe"
+        $exePaths = @(
+          "ptexutils/build/src/ptxtransfer.exe",
+          "ptexutils/build/src/Release/ptxtransfer.exe",
+          "ptexutils/build/Release/ptxtransfer.exe"
+        )
         
-        # 检查文件是否存在
-        if (-Not (Test-Path $exe)) {
-          Write-Error "ptxtransfer.exe not found!"
-          exit 1
+        $found = $null
+        foreach ($path in $exePaths) {
+          if (Test-Path $path) {
+            $found = $path
+            Write-Host "Found ptxtransfer.exe at: $path"
+            break
+          }
         }
         
-        # 检查依赖（应该只看到系统DLL）
-        $deps = & "dumpbin" /dependents $exe | Select-String "\.dll"
-        Write-Host "Dependencies found:"
-        $deps | ForEach-Object { Write-Host $_.Line }
-        
-        # 如果看到 Ptex.dll 或 zlib.dll，说明不是静态链接
-        if ($deps -match "ptex|zlib") {
-          Write-Warning "Not fully static! Found external DLL dependencies."
-        } else {
-          Write-Host "✓ Static linking verified!" -ForegroundColor Green
+        if (-not $found) {
+          Write-Host "Searching recursively..."
+          $found = Get-ChildItem -Path "." -Name "ptxtransfer.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($found) { $found = Resolve-Path $found }
         }
         
-        # 复制到根目录
-        Copy-Item $exe "ptxtransfer.exe"
+        if (-not $found) {
+          throw "ptxtransfer.exe not found in any expected location!"
+        }
+        
+        Copy-Item $found "ptxtransfer.exe"
+        Write-Host "Copied to root as ptxtransfer.exe"
+        
+        # 验证依赖
+        Write-Host "`nChecking dependencies..."
+        dumpbin /dependents "ptxtransfer.exe"
     
-    # 5. 上传 Artifact (关键修改：v3 -> v4)
+    # 5. 上传
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ptxtransfer-windows-x64
         path: ptxtransfer.exe
-        if-no-files-found: error  # v4 新特性：如果没有文件则报错
+        if-no-files-found: error
     
-    # 6. 创建 Release (如果是tag)
+    # 6. Release
     - name: Release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
@@ -117,20 +143,8 @@ jobs:
         name: "Ptxtransfer ${{ github.ref_name }}"
         body: |
           ## 静态编译版 Ptxtransfer for Windows
-          
-          ### 特性
-          - ✅ 完全静态链接（无 DLL 依赖）
-          - ✅ Visual Studio 2019 编译（兼容 Maya 2022）
-          - ✅ x64 架构
-          
-          ### 使用方法
-          1. 下载 `ptxtransfer.exe`
-          2. 放入你的 Maya 工具目录
-          3. 通过 Python subprocess 调用
-          
-          ### 依赖库版本
-          - Zlib: 1.3
-          - Ptex: 2.4.2
-          - Ptexutils: latest
+          - 完全静态链接（无 DLL 依赖）
+          - Visual Studio 2019 编译（兼容 Maya 2022）
+          - x64 架构
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
