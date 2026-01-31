@@ -77,11 +77,45 @@ jobs:
         Write-Host "Checking for cmake config files:"
         Get-ChildItem "$installPath" -Recurse -Filter "*.cmake" -ErrorAction SilentlyContinue
     
+    - name: Build Ptex
+      shell: powershell
+      run: |
+        git clone --depth 1 --branch v2.4.2 https://github.com/wdas/ptex.git
+        cd ptex
+        
+        $rootPath = ((Get-Location).Path | Split-Path) -replace '\\', '/'
+        $zlibPath = "$rootPath/zlib-install"
+        $installPath = "$rootPath/ptex-install"
+        $buildPath = "$rootPath/ptex-build"
+        
+        if (!(Test-Path $zlibPath)) { throw "Zlib not found" }
+        New-Item -ItemType Directory -Force -Path $installPath | Out-Null
+        New-Item -ItemType Directory -Force -Path $buildPath | Out-Null
+        
+        cd $buildPath
+        cmake .. -G "NMake Makefiles" `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DBUILD_SHARED_LIBS=OFF `
+          -DPTEX_BUILD_SHARED_LIBS=OFF `
+          -DZLIB_ROOT="$zlibPath" `
+          -DZLIB_LIBRARY="$zlibPath/lib/zlibstatic.lib" `
+          -DCMAKE_INSTALL_PREFIX="$installPath"
+        if ($LASTEXITCODE -ne 0) { throw "CMake failed" }
+        nmake
+        if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+        nmake install
+        
+        # 关键：同时保留 build 目录（包含 PtexTargets.cmake）
+        Write-Host "Checking build directory for cmake files:"
+        Get-ChildItem "." -Filter "*.cmake" -Recurse | Select-Object -First 10
+        
+        cd ../..
+
     - name: Build Ptxutils
       shell: powershell
       run: |
         git clone --depth 1 https://github.com/wdas/ptexutils.git
-        cd ptexutils
+        cd ptxutils
         
         # 强制静态运行时
         $content = Get-Content CMakeLists.txt -Raw
@@ -89,28 +123,25 @@ jobs:
         $content | Set-Content CMakeLists.txt -NoNewline
         
         $rootPath = ((Get-Location).Path | Split-Path) -replace '\\', '/'
-        $ptexPath = "$rootPath/ptex-install"
+        $ptexBuildPath = "$rootPath/ptex-build"  # 使用 build 目录而不是 install
         $zlibPath = "$rootPath/zlib-install"
         
-        if (!(Test-Path $ptexPath)) { throw "Ptex not found at $ptexPath" }
+        if (!(Test-Path $ptexBuildPath)) { throw "Ptex build dir not found" }
         
-        # 查找 PtexConfig.cmake 的实际位置
-        $cmakeConfig = Get-ChildItem -Path "$ptexPath" -Name "PtexConfig.cmake" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($cmakeConfig) {
-          Write-Host "Found PtexConfig.cmake at: $cmakeConfig"
-          $ptexCmakeDir = Split-Path (Join-Path "$ptexPath" $cmakeConfig) -Parent
+        # 查找 cmake 配置文件
+        $ptexConfig = Get-ChildItem -Path "$ptexBuildPath" -Name "PtexConfig.cmake" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($ptexConfig) {
+          $ptexCmakeDir = Split-Path (Join-Path "$ptexBuildPath" $ptexConfig) -Parent
           $env:Ptex_DIR = $ptexCmakeDir
+          Write-Host "Found PtexConfig.cmake at: $ptexCmakeDir"
         } else {
-          Write-Host "WARNING: PtexConfig.cmake not found, trying default paths"
-          # 尝试常见路径
-          if (Test-Path "$ptexPath/lib/cmake/Ptex") {
-            $env:Ptex_DIR = "$ptexPath/lib/cmake/Ptex"
-          } elseif (Test-Path "$ptexPath/cmake") {
-            $env:Ptex_DIR = "$ptexPath/cmake"
-          }
+          # 尝试直接使用 build 目录
+          $env:Ptex_DIR = "$ptexBuildPath"
+          Write-Host "Using Ptex build directory: $ptexBuildPath"
         }
         
-        Write-Host "Using Ptex_DIR: $env:Ptex_DIR"
+        # 设置包含路径和库路径
+        $env:CMAKE_PREFIX_PATH = "$ptexBuildPath;$zlibPath"
         
         New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
@@ -118,6 +149,10 @@ jobs:
         cmake .. -G "NMake Makefiles" `
           -DCMAKE_BUILD_TYPE=Release `
           -DBUILD_SHARED_LIBS=OFF `
+          -DCMAKE_PREFIX_PATH="$ptexBuildPath;$zlibPath" `
+          -DPtex_DIR="$ptexBuildPath" `
+          -DPTEX_INCLUDE_DIR="$ptexBuildPath/src" `
+          -DPTEX_LIBRARY="$ptexBuildPath/src/Release/Ptex.lib" `
           -DZLIB_ROOT="$zlibPath" `
           -DZLIB_LIBRARY="$zlibPath/lib/zlibstatic.lib"
           
