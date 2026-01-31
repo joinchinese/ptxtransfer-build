@@ -73,33 +73,45 @@ jobs:
           Write-Error "Ptex.lib not found"
           exit 1 
         }
-        $ptexInclude = ((Resolve-Path ../ptex/build/src).Path + "").Replace("\", "/")
-        $ptexLibPath = ($ptexLib.FullName + "").Replace("\", "/")
         
         $zlibLib = Get-ChildItem -Path "../zlib-install" -Filter "zlibstatic.lib" -Recurse | Select-Object -First 1
         if (-not $zlibLib) { 
           Write-Error "zlibstatic.lib not found"
           exit 1 
         }
-        $zlibLibPath = ($zlibLib.FullName + "").Replace("\", "/")
+        
+        # 处理所有路径为正斜杠（关键修复）
+        $ptexInclude = ((Resolve-Path ../ptex/build/src).Path).Replace("\", "/")
+        $ptexLibPath = ($ptexLib.FullName).Replace("\", "/")
+        $zlibLibPath = ($zlibLib.FullName).Replace("\", "/")
+        
+        # Split-Path 后也要替换（关键！）
+        $ptexDir = (Split-Path $ptexLibPath -Parent).Replace("\", "/")
+        $zlibDir = (Split-Path $zlibLibPath -Parent).Replace("\", "/")
         
         # 创建 cmake 目录
         New-Item -ItemType Directory -Force -Path "cmake" | Out-Null
         
-        # 创建 CustomPaths.cmake（使用简单字符串避免转义问题）
-        $cmakeContent = "set(CMAKE_MSVC_RUNTIME_LIBRARY `"MultiThreaded`")`n"
-        $cmakeContent += "set(PTEX_INCLUDE_DIR `"$ptexInclude`")`n"
-        $cmakeContent += "set(PTEX_LIBRARY `"$ptexLibPath`")`n"
-        $cmakeContent += "set(ZLIB_LIBRARY `"$zlibLibPath`")`n"
-        $cmakeContent += "include_directories(${PTEX_INCLUDE_DIR})`n"
-        $cmakeContent += "link_directories(`"$((Split-Path $ptexLibPath -Parent))`" `"$((Split-Path $zlibLibPath -Parent))`")"
+        # 创建 CustomPaths.cmake（所有路径已确保为正斜杠）
+        $lines = @(
+          'set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")'
+          "set(PTEX_INCLUDE_DIR `"$ptexInclude`")"
+          "set(PTEX_LIBRARY `"$ptexLibPath`")"
+          "set(ZLIB_LIBRARY `"$zlibLibPath`")"
+          "include_directories(`${PTEX_INCLUDE_DIR})"
+          "link_directories(`"$ptexDir`" `"$zlibDir`")"
+        )
         
-        $cmakeContent | Out-File -FilePath "cmake/CustomPaths.cmake" -Encoding utf8
+        $lines | Out-File -FilePath "cmake/CustomPaths.cmake" -Encoding utf8
+        
+        # 验证文件内容
+        Write-Host "Generated cmake/CustomPaths.cmake:"
+        Get-Content cmake/CustomPaths.cmake
         
         # 替换 CMakeLists.txt
         $content = Get-Content CMakeLists.txt -Raw
         $content = $content -replace 'find_package\s*\(\s*Ptex\s+REQUIRED\s*\)', "include(cmake/CustomPaths.cmake)`n"
-        $content = $content -replace '\bPtex::Ptex\b', "${PTEX_LIBRARY}"
+        $content = $content -replace '\bPtex::Ptex\b', "`${PTEX_LIBRARY}"
         $content | Set-Content CMakeLists.txt -NoNewline
         
         Write-Host "Patched CMakeLists.txt successfully"
