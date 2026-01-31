@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-2019
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4  # 也建议升级到 v4
     
     # 设置 VS 2019 环境
     - name: Setup MSVC
@@ -100,12 +100,13 @@ jobs:
         # 复制到根目录
         Copy-Item $exe "ptxtransfer.exe"
     
-    # 5. 上传 Artifact
+    # 5. 上传 Artifact (关键修改：v3 -> v4)
     - name: Upload Artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ptxtransfer-windows-x64
         path: ptxtransfer.exe
+        if-no-files-found: error  # v4 新特性：如果没有文件则报错
     
     # 6. 创建 Release (如果是tag)
     - name: Release
