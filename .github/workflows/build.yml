@@ -76,6 +76,7 @@ jobs:
         git clone --depth 1 https://github.com/wdas/ptexutils.git
         cd ptexutils
         
+        # 修改 CMakeLists.txt 强制静态运行时
         $content = Get-Content CMakeLists.txt -Raw
         $content = $content -replace 'if\(PTEX_FOUND\)', "set(CMAKE_MSVC_RUNTIME_LIBRARY `"MultiThreaded`")`nif(PTEX_FOUND)"
         $content | Set-Content CMakeLists.txt -NoNewline
@@ -86,12 +87,15 @@ jobs:
         
         if (!(Test-Path $ptexPath)) { throw "Ptex not found" }
         
+        # 关键：设置 CMAKE_PREFIX_PATH 让 CMake 找到 PtexConfig.cmake
+        $env:CMAKE_PREFIX_PATH = "$ptexPath/lib/cmake"
+        
         New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
         cmake .. -G "NMake Makefiles" `
           -DCMAKE_BUILD_TYPE=Release `
           -DBUILD_SHARED_LIBS=OFF `
-          -DPTEX_LOCATION="$ptexPath" `
+          -DCMAKE_PREFIX_PATH="$ptexPath/lib/cmake" `
           -DZLIB_ROOT="$zlibPath" `
           -DZLIB_LIBRARY="$zlibPath/lib/zlibstatic.lib"
         if ($LASTEXITCODE -ne 0) { throw "CMake failed" }
