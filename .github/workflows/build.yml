@@ -64,7 +64,7 @@ jobs:
       run: |
         if (Test-Path "ptexutils") { Remove-Item -Recurse -Force "ptexutils" }
         git clone --depth 1 https://github.com/wdas/ptexutils.git
-        cd ptxutils
+        cd ptexutils  # <-- 修正：原来是 ptxutils，改为 ptexutils
         
         # 创建自定义 CMake 配置，避免修改原文件
         $ptexRoot = "$(Resolve-Path ../ptex)" -replace '\\', '/'
