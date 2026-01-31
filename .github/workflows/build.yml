@@ -1,172 +1,47 @@
-name: Build Static Ptxtransfer
+name: Build Windows PtexUtils
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  workflow_dispatch:
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
-  build-windows:
-    runs-on: windows-2019
+  build:
+    runs-on: windows-latest
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v3
     
-    - name: Setup MSVC
-      uses: ilammy/msvc-dev-cmd@v1
-      with:
-        arch: x64
-    
-    - name: Build Zlib
-      shell: pwsh
+    - name: Clone Ptex Library
       run: |
-        if (Test-Path "zlib") { Remove-Item -Recurse -Force "zlib" }
-        git clone --depth 1 --branch v1.3 https://github.com/madler/zlib.git
-        cd zlib
-        
-        $install = (Resolve-Path ..).Path + "/zlib-install"
-        $install = $install.Replace("\", "/")
-        New-Item -ItemType Directory -Force -Path "../zlib-install" | Out-Null
-        New-Item -ItemType Directory -Force -Path build | Out-Null
-        cd build
-        
-        cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$install" -DBUILD_SHARED_LIBS=OFF
-        if ($LASTEXITCODE -ne 0) { exit 1 }
-        nmake
-        if ($LASTEXITCODE -ne 0) { exit 1 }
-        nmake install
-        cd ../..
-    
-    - name: Build Ptex
-      shell: pwsh
-      run: |
-        if (Test-Path "ptex") { Remove-Item -Recurse -Force "ptex" }
-        git clone --depth 1 --branch v2.4.2 https://github.com/wdas/ptex.git
-        cd ptex
-        
-        $zlib = (Resolve-Path ../zlib-install).Path.Replace("\", "/")
-        New-Item -ItemType Directory -Force -Path build | Out-Null
-        cd build
-        
-        cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DPTEX_BUILD_SHARED_LIBS=OFF -DPTEX_BUILD_TESTS=OFF -DPTEX_BUILD_EXAMPLES=OFF -DPTEX_BUILD_DOCS=OFF -DZLIB_ROOT="$zlib" -DZLIB_LIBRARY="$zlib/lib/zlibstatic.lib"
-        if ($LASTEXITCODE -ne 0) { exit 1 }
-        nmake
-        if ($LASTEXITCODE -ne 0) { exit 1 }
-        cd ../..
-    
-    - name: Download Ptxutils
-      shell: pwsh
-      run: |
-        if (Test-Path "ptexutils") { Remove-Item -Recurse -Force "ptexutils" }
-        git clone --depth 1 https://github.com/wdas/ptexutils.git
-    
-    - name: Prepare Ptxutils
-      shell: pwsh
-      run: |
-        cd ptexutils
-        
-        # 查找库文件
-        $ptexLib = Get-ChildItem -Path "../ptex" -Filter "Ptex.lib" -Recurse | Select-Object -First 1
-        if (-not $ptexLib) { 
-          Write-Error "Ptex.lib not found"
-          exit 1 
-        }
-        
-        $zlibLib = Get-ChildItem -Path "../zlib-install" -Filter "zlibstatic.lib" -Recurse | Select-Object -First 1
-        if (-not $zlibLib) { 
-          Write-Error "zlibstatic.lib not found"
-          exit 1 
-        }
-        
-        # 处理所有路径为正斜杠
-        $ptexInclude = ((Resolve-Path ../ptex/build/src).Path).Replace("\", "/")
-        $ptexLibPath = ($ptexLib.FullName).Replace("\", "/")
-        $zlibLibPath = ($zlibLib.FullName).Replace("\", "/")
-        $ptexDir = (Split-Path $ptexLibPath -Parent).Replace("\", "/")
-        $zlibDir = (Split-Path $zlibLibPath -Parent).Replace("\", "/")
-        
-        # 创建 cmake 目录
-        New-Item -ItemType Directory -Force -Path "cmake" | Out-Null
-        
-        # 创建 CustomPaths.cmake
-        $lines = @(
-          'set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")'
-          "set(PTEX_INCLUDE_DIR `"$ptexInclude`")"
-          "set(PTEX_LIBRARY `"$ptexLibPath`")"
-          "set(ZLIB_LIBRARY `"$zlibLibPath`")"
-          "include_directories(`${PTEX_INCLUDE_DIR})"
-          "link_directories(`"$ptexDir`" `"$zlibDir`")"
-        )
-        $lines | Out-File -FilePath "cmake/CustomPaths.cmake" -Encoding utf8
-        
-        # 修改 CMakeLists.txt：移除 Ptex find_package 和 GLUT 依赖
-        $content = Get-Content CMakeLists.txt -Raw
-        
-        # 替换 find_package(Ptex)
-        $content = $content -replace 'find_package\s*\(\s*Ptex\s+REQUIRED\s*\)', "include(cmake/CustomPaths.cmake)`n"
-        
-        # 移除 GLUT 相关（ptxtransfer 不需要 GUI）
-        $content = $content -replace 'find_package\s*\(\s*GLUT[^)]*\)', ''
-        $content = $content -replace 'if\s*\(\s*GLUT_FOUND\s*\).*?endif\s*\(\s*\)', ''  # 移除 GLUT 相关的 if 块（简化处理）
-        
-        # 替换 Ptex::Ptex
-        $content = $content -replace '\bPtex::Ptex\b', "`${PTEX_LIBRARY}"
-        
-        $content | Set-Content CMakeLists.txt -NoNewline
-        
-        # 显示修改后的关键部分
-        Write-Host "Modified CMakeLists.txt (first 30 lines):"
-        Get-Content CMakeLists.txt -TotalCount 30
-        
         cd ..
+        git clone https://github.com/wdas/ptex.git
     
-    - name: Build Ptxutils
-      shell: pwsh
+    - name: Build Ptex Library
       run: |
-        cd ptexutils
-        New-Item -ItemType Directory -Force -Path build | Out-Null
+        cd ..\ptex
+        mkdir build
         cd build
-        
-        cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
-        if ($LASTEXITCODE -ne 0) { 
-          Write-Error "CMake configuration failed"
-          exit 1 
-        }
-        nmake
-        if ($LASTEXITCODE -ne 0) { 
-          Write-Error "Build failed"
-          exit 1 
-        }
-        cd ../..
+        cmake .. -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE\ptex-install"
+        cmake --build . --config Release
+        cmake --install .
     
-    - name: Find and Copy Executable
-      shell: pwsh
+    - name: Build PtexUtils
       run: |
-        $exe = Get-ChildItem -Path "ptexutils" -Filter "ptxtransfer.exe" -Recurse | Select-Object -First 1
-        if (-not $exe) { 
-          Write-Error "ptxtransfer.exe not found in ptexutils directory"
-          exit 1 
-        }
-        
-        $source = $exe.FullName
-        $dest = (Resolve-Path .).Path + "/ptxtransfer.exe"
-        
-        Copy-Item $source $dest
-        Write-Host "Copied executable to: $dest"
-        Write-Host "File size: $((Get-Item $dest).Length) bytes"
+        mkdir build
+        cd build
+        cmake .. -G "Visual Studio 17 2022" -A x64 `
+          -DPTEX_LIBRARY="$env:GITHUB_WORKSPACE\ptex-install\lib\Ptex.lib" `
+          -DPTEX_INCLUDE_DIR="$env:GITHUB_WORKSPACE\ptex-install\include" `
+          -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE\install"
+        cmake --build . --config Release
+        cmake --install .
     
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
+    - name: Upload Binaries
+      uses: actions/upload-artifact@v3
       with:
-        name: ptxtransfer-windows-x64
-        path: ptxtransfer.exe
-    
-    - name: Release
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: ptxtransfer.exe
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        name: ptxutils-windows
+        path: |
+          install\bin\ptxtransfer.exe
+          install\bin\ptxconvert.exe
+          install\bin\ptxview.exe
+          install\bin\*.dll
