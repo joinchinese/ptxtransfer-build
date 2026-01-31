@@ -22,6 +22,7 @@ jobs:
     - name: Build Zlib
       shell: powershell
       run: |
+        if (Test-Path "zlib") { Remove-Item -Recurse -Force "zlib" }
         git clone --depth 1 --branch v1.3 https://github.com/madler/zlib.git
         cd zlib
         
@@ -36,129 +37,117 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release `
           -DCMAKE_INSTALL_PREFIX="$installPath" `
           -DBUILD_SHARED_LIBS=OFF
-        if ($LASTEXITCODE -ne 0) { throw "CMake failed" }
+        if ($LASTEXITCODE -ne 0) { throw "Zlib CMake failed" }
         nmake
-        if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+        if ($LASTEXITCODE -ne 0) { throw "Zlib build failed" }
         nmake install
         cd ../..
-        
-        Write-Host "Zlib installed at: $installPath"
-        Get-ChildItem "$installPath" -Recurse | Select-Object -First 20
     
     - name: Build Ptex
       shell: powershell
       run: |
+        if (Test-Path "ptex") { Remove-Item -Recurse -Force "ptex" }
         git clone --depth 1 --branch v2.4.2 https://github.com/wdas/ptex.git
         cd ptex
         
         $rootPath = ((Get-Location).Path | Split-Path) -replace '\\', '/'
         $zlibPath = "$rootPath/zlib-install"
         $installPath = "$rootPath/ptex-install"
-        
-        if (!(Test-Path $zlibPath)) { throw "Zlib not found" }
-        New-Item -ItemType Directory -Force -Path $installPath | Out-Null
         
         New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
+        
+        # 关键：禁用测试、示例和文档（不需要 GLUT）
         cmake .. -G "NMake Makefiles" `
           -DCMAKE_BUILD_TYPE=Release `
           -DBUILD_SHARED_LIBS=OFF `
           -DPTEX_BUILD_SHARED_LIBS=OFF `
+          -DPTEX_BUILD_TESTS=OFF `
+          -DPTEX_BUILD_EXAMPLES=OFF `
+          -DPTEX_BUILD_DOCS=OFF `
           -DZLIB_ROOT="$zlibPath" `
           -DZLIB_LIBRARY="$zlibPath/lib/zlibstatic.lib" `
           -DCMAKE_INSTALL_PREFIX="$installPath"
-        if ($LASTEXITCODE -ne 0) { throw "CMake failed" }
+          
+        if ($LASTEXITCODE -ne 0) { throw "Ptex CMake failed" }
         nmake
-        if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+        if ($LASTEXITCODE -ne 0) { throw "Ptex build failed" }
         nmake install
-        cd ../..
         
-        Write-Host "Ptex installed at: $installPath"
-        Write-Host "Checking for cmake config files:"
-        Get-ChildItem "$installPath" -Recurse -Filter "*.cmake" -ErrorAction SilentlyContinue
+        Write-Host "Ptex build complete. Checking cmake files:"
+        Get-ChildItem "." -Filter "PtexConfig.cmake" -Recurse
+        Get-ChildItem "$installPath" -Filter "PtexConfig.cmake" -Recurse
+        
+        cd ../..
     
-    - name: Build Ptex
-      shell: powershell
-      run: |
-        git clone --depth 1 --branch v2.4.2 https://github.com/wdas/ptex.git
-        cd ptex
-        
-        $rootPath = ((Get-Location).Path | Split-Path) -replace '\\', '/'
-        $zlibPath = "$rootPath/zlib-install"
-        $installPath = "$rootPath/ptex-install"
-        $buildPath = "$rootPath/ptex-build"
-        
-        if (!(Test-Path $zlibPath)) { throw "Zlib not found" }
-        New-Item -ItemType Directory -Force -Path $installPath | Out-Null
-        New-Item -ItemType Directory -Force -Path $buildPath | Out-Null
-        
-        cd $buildPath
-        cmake .. -G "NMake Makefiles" `
-          -DCMAKE_BUILD_TYPE=Release `
-          -DBUILD_SHARED_LIBS=OFF `
-          -DPTEX_BUILD_SHARED_LIBS=OFF `
-          -DZLIB_ROOT="$zlibPath" `
-          -DZLIB_LIBRARY="$zlibPath/lib/zlibstatic.lib" `
-          -DCMAKE_INSTALL_PREFIX="$installPath"
-        if ($LASTEXITCODE -ne 0) { throw "CMake failed" }
-        nmake
-        if ($LASTEXITCODE -ne 0) { throw "Build failed" }
-        nmake install
-        
-        # 关键：同时保留 build 目录（包含 PtexTargets.cmake）
-        Write-Host "Checking build directory for cmake files:"
-        Get-ChildItem "." -Filter "*.cmake" -Recurse | Select-Object -First 10
-        
-        cd ../..
-
     - name: Build Ptxutils
       shell: powershell
       run: |
+        if (Test-Path "ptexutils") { Remove-Item -Recurse -Force "ptexutils" }
         git clone --depth 1 https://github.com/wdas/ptexutils.git
         cd ptxutils
         
-        # 强制静态运行时
-        $content = Get-Content CMakeLists.txt -Raw
-        $content = $content -replace 'if\(PTEX_FOUND\)', "set(CMAKE_MSVC_RUNTIME_LIBRARY `"MultiThreaded`")`nif(PTEX_FOUND)"
-        $content | Set-Content CMakeLists.txt -NoNewline
-        
         $rootPath = ((Get-Location).Path | Split-Path) -replace '\\', '/'
-        $ptexBuildPath = "$rootPath/ptex-build"  # 使用 build 目录而不是 install
+        $ptexInstall = "$rootPath/ptex-install"
+        $ptexBuild = "$rootPath/ptex/build"
         $zlibPath = "$rootPath/zlib-install"
         
-        if (!(Test-Path $ptexBuildPath)) { throw "Ptex build dir not found" }
-        
-        # 查找 cmake 配置文件
-        $ptexConfig = Get-ChildItem -Path "$ptexBuildPath" -Name "PtexConfig.cmake" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($ptexConfig) {
-          $ptexCmakeDir = Split-Path (Join-Path "$ptexBuildPath" $ptexConfig) -Parent
-          $env:Ptex_DIR = $ptexCmakeDir
-          Write-Host "Found PtexConfig.cmake at: $ptexCmakeDir"
+        # 查找 PtexConfig.cmake
+        $configFile = Get-ChildItem -Path "$ptexInstall" -Name "PtexConfig.cmake" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $configFile) {
+          $configFile = Get-ChildItem -Path "$ptexBuild" -Name "PtexConfig.cmake" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          $ptexCmakeDir = "$ptexBuild"
         } else {
-          # 尝试直接使用 build 目录
-          $env:Ptex_DIR = "$ptexBuildPath"
-          Write-Host "Using Ptex build directory: $ptexBuildPath"
+          $ptexCmakeDir = Split-Path (Join-Path "$ptexInstall" $configFile) -Parent
         }
         
-        # 设置包含路径和库路径
-        $env:CMAKE_PREFIX_PATH = "$ptexBuildPath;$zlibPath"
+        if (-not $configFile) {
+          Write-Host "PtexConfig.cmake not found, using manual paths"
+          $manualMode = $true
+        } else {
+          Write-Host "Found PtexConfig.cmake at: $ptexCmakeDir"
+          $env:Ptex_DIR = $ptexCmakeDir
+          $manualMode = $false
+        }
+        
+        # 修改 CMakeLists.txt
+        $content = Get-Content CMakeLists.txt -Raw
+        
+        if ($manualMode) {
+          # 手动模式：直接指定所有路径
+          $injection = @"
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+set(PTEX_INCLUDE_DIR "$ptexInstall/include")
+set(PTEX_LIBRARY "$ptexBuild/src/Release/Ptex.lib")
+include_directories(`${PTEX_INCLUDE_DIR})
+link_directories($ptexBuild/src/Release $zlibPath/lib)
+
+"@
+          $content = $content -replace 'find_package\(Ptex REQUIRED\)', ''
+          $content = $content -replace 'Ptex::Ptex', '${PTEX_LIBRARY}'
+          $content = $content -replace '(project\(.*?\))', "`$1`n$injection"
+        } else {
+          # 使用 find_package 模式，但强制静态链接
+          $content = $content -replace '(project\(.*?\))', "`$1`nset(CMAKE_MSVC_RUNTIME_LIBRARY `"MultiThreaded`")"
+        }
+        
+        $content | Set-Content CMakeLists.txt -NoNewline
         
         New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
         
-        cmake .. -G "NMake Makefiles" `
-          -DCMAKE_BUILD_TYPE=Release `
-          -DBUILD_SHARED_LIBS=OFF `
-          -DCMAKE_PREFIX_PATH="$ptexBuildPath;$zlibPath" `
-          -DPtex_DIR="$ptexBuildPath" `
-          -DPTEX_INCLUDE_DIR="$ptexBuildPath/src" `
-          -DPTEX_LIBRARY="$ptexBuildPath/src/Release/Ptex.lib" `
-          -DZLIB_ROOT="$zlibPath" `
-          -DZLIB_LIBRARY="$zlibPath/lib/zlibstatic.lib"
-          
-        if ($LASTEXITCODE -ne 0) { throw "CMake failed" }
+        if ($manualMode) {
+          cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DZLIB_ROOT="$zlibPath"
+        } else {
+          cmake .. -G "NMake Makefiles" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="$ptexInstall;$zlibPath" `
+            -DZLIB_ROOT="$zlibPath"
+        }
+        
+        if ($LASTEXITCODE -ne 0) { throw "Ptxutils CMake failed" }
         nmake
-        if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+        if ($LASTEXITCODE -ne 0) { throw "Ptxutils build failed" }
         cd ../..
     
     - name: Find and copy executable
@@ -166,14 +155,13 @@ jobs:
       run: |
         $exe = Get-ChildItem -Path "ptexutils" -Name "ptxtransfer.exe" -Recurse | Select-Object -First 1
         if (!$exe) { 
-          Write-Host "Searching all directories for ptxtransfer.exe..."
           $exe = Get-ChildItem -Path "." -Name "ptxtransfer.exe" -Recurse | Select-Object -First 1
         }
-        if (!$exe) { throw "Executable not found" }
-        $fullPath = Join-Path "." $exe
+        if (!$exe) { throw "ptxtransfer.exe not found" }
+        
+        $fullPath = if ($exe -like "ptexutils*") { Join-Path "." $exe } else { $exe }
         Copy-Item $fullPath "ptxtransfer.exe"
-        Write-Host "Copied from: $fullPath"
-        Get-Item "ptxtransfer.exe"
+        Write-Host "Copied: $fullPath -> ptxtransfer.exe"
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
