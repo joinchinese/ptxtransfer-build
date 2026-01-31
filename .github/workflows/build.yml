@@ -26,14 +26,17 @@ jobs:
         git clone --depth 1 --branch v1.3 https://github.com/madler/zlib.git
         cd zlib
         
+        $install = (Resolve-Path ..).Path + "/zlib-install"
+        $install = $install.Replace("\", "/")
         New-Item -ItemType Directory -Force -Path "../zlib-install" | Out-Null
-        $install = (Resolve-Path "../zlib-install").Path
         New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
         
         cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$install" -DBUILD_SHARED_LIBS=OFF
         if ($LASTEXITCODE -ne 0) { exit 1 }
-        nmake && nmake install
+        nmake
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+        nmake install
         cd ../..
     
     - name: Build Ptex
@@ -43,21 +46,14 @@ jobs:
         git clone --depth 1 --branch v2.4.2 https://github.com/wdas/ptex.git
         cd ptex
         
-        $zlib = (Resolve-Path "../zlib-install").Path
+        $zlib = (Resolve-Path ../zlib-install).Path.Replace("\", "/")
         New-Item -ItemType Directory -Force -Path build | Out-Null
         cd build
         
-        cmake .. -G "NMake Makefiles" `
-          -DCMAKE_BUILD_TYPE=Release `
-          -DBUILD_SHARED_LIBS=OFF `
-          -DPTEX_BUILD_SHARED_LIBS=OFF `
-          -DPTEX_BUILD_TESTS=OFF `
-          -DPTEX_BUILD_EXAMPLES=OFF `
-          -DPTEX_BUILD_DOCS=OFF `
-          -DZLIB_ROOT="$zlib" `
-          -DZLIB_LIBRARY="$zlib/lib/zlibstatic.lib"
+        cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DPTEX_BUILD_SHARED_LIBS=OFF -DPTEX_BUILD_TESTS=OFF -DPTEX_BUILD_EXAMPLES=OFF -DPTEX_BUILD_DOCS=OFF -DZLIB_ROOT="$zlib" -DZLIB_LIBRARY="$zlib/lib/zlibstatic.lib"
         if ($LASTEXITCODE -ne 0) { exit 1 }
         nmake
+        if ($LASTEXITCODE -ne 0) { exit 1 }
         cd ../..
     
     - name: Download Ptxutils
@@ -66,36 +62,83 @@ jobs:
         if (Test-Path "ptexutils") { Remove-Item -Recurse -Force "ptexutils" }
         git clone --depth 1 https://github.com/wdas/ptexutils.git
     
-    - name: Patch and Build Ptxutils
-      shell: cmd
+    - name: Prepare Ptxutils
+      shell: pwsh
       run: |
         cd ptexutils
         
-        rem 创建简单的 CMake 配置文件
-        mkdir cmake 2>nul
-        echo set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded") > cmake/CustomPaths.cmake
-        echo set(PTEX_INCLUDE_DIR "%CD%/../ptex/build/src") >> cmake/CustomPaths.cmake
-        echo set(PTEX_LIBRARY "%CD%/../ptex/build/src/Release/Ptex.lib") >> cmake/CustomPaths.cmake
-        echo set(ZLIB_LIBRARY "%CD%/../zlib-install/lib/zlibstatic.lib") >> cmake/CustomPaths.cmake
+        # 查找库文件
+        $ptexLib = Get-ChildItem -Path "../ptex" -Filter "Ptex.lib" -Recurse | Select-Object -First 1
+        if (-not $ptexLib) { 
+          Write-Error "Ptex.lib not found"
+          exit 1 
+        }
+        $ptexInclude = ((Resolve-Path ../ptex/build/src).Path + "").Replace("\", "/")
+        $ptexLibPath = ($ptexLib.FullName + "").Replace("\", "/")
         
-        rem 修改 CMakeLists.txt
-        powershell -Command "(Get-Content CMakeLists.txt) -replace 'find_package\(Ptex REQUIRED\)', 'include(cmake/CustomPaths.cmake)' | Set-Content CMakeLists.txt"
-        powershell -Command "(Get-Content CMakeLists.txt) -replace 'Ptex::Ptex', '${PTEX_LIBRARY}' | Set-Content CMakeLists.txt"
+        $zlibLib = Get-ChildItem -Path "../zlib-install" -Filter "zlibstatic.lib" -Recurse | Select-Object -First 1
+        if (-not $zlibLib) { 
+          Write-Error "zlibstatic.lib not found"
+          exit 1 
+        }
+        $zlibLibPath = ($zlibLib.FullName + "").Replace("\", "/")
         
-        rem 构建
-        mkdir build
-        cd build
-        cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
-        nmake
-        cd ../..
+        # 创建 cmake 目录
+        New-Item -ItemType Directory -Force -Path "cmake" | Out-Null
+        
+        # 创建 CustomPaths.cmake（使用简单字符串避免转义问题）
+        $cmakeContent = "set(CMAKE_MSVC_RUNTIME_LIBRARY `"MultiThreaded`")`n"
+        $cmakeContent += "set(PTEX_INCLUDE_DIR `"$ptexInclude`")`n"
+        $cmakeContent += "set(PTEX_LIBRARY `"$ptexLibPath`")`n"
+        $cmakeContent += "set(ZLIB_LIBRARY `"$zlibLibPath`")`n"
+        $cmakeContent += "include_directories(${PTEX_INCLUDE_DIR})`n"
+        $cmakeContent += "link_directories(`"$((Split-Path $ptexLibPath -Parent))`" `"$((Split-Path $zlibLibPath -Parent))`")"
+        
+        $cmakeContent | Out-File -FilePath "cmake/CustomPaths.cmake" -Encoding utf8
+        
+        # 替换 CMakeLists.txt
+        $content = Get-Content CMakeLists.txt -Raw
+        $content = $content -replace 'find_package\s*\(\s*Ptex\s+REQUIRED\s*\)', "include(cmake/CustomPaths.cmake)`n"
+        $content = $content -replace '\bPtex::Ptex\b', "${PTEX_LIBRARY}"
+        $content | Set-Content CMakeLists.txt -NoNewline
+        
+        Write-Host "Patched CMakeLists.txt successfully"
+        cd ..
     
-    - name: Copy Executable
+    - name: Build Ptxutils
       shell: pwsh
       run: |
-        $exe = Get-ChildItem -Path "ptexutils" -Name "ptxtransfer.exe" -Recurse | Select-Object -First 1
-        if (-not $exe) { throw "Executable not found" }
-        Copy-Item (Join-Path "ptexutils" $exe) "ptxtransfer.exe"
-        Write-Host "Success"
+        cd ptexutils
+        New-Item -ItemType Directory -Force -Path build | Out-Null
+        cd build
+        
+        cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+        if ($LASTEXITCODE -ne 0) { 
+          Write-Error "CMake configuration failed"
+          exit 1 
+        }
+        nmake
+        if ($LASTEXITCODE -ne 0) { 
+          Write-Error "Build failed"
+          exit 1 
+        }
+        cd ../..
+    
+    - name: Find and Copy Executable
+      shell: pwsh
+      run: |
+        $exe = Get-ChildItem -Path "ptexutils" -Filter "ptxtransfer.exe" -Recurse | Select-Object -First 1
+        if (-not $exe) { 
+          Write-Error "ptxtransfer.exe not found in ptexutils directory"
+          exit 1 
+        }
+        
+        $source = $exe.FullName
+        $dest = (Resolve-Path .).Path + "/ptxtransfer.exe"
+        
+        Copy-Item $source $dest
+        Write-Host "Copied executable to: $dest"
+        Write-Host "File size: $((Get-Item $dest).Length) bytes"
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
